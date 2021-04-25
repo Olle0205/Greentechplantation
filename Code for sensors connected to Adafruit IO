@@ -1,22 +1,31 @@
 #include "Config.h"
-#include <Wire.h>
+#include <Wire.h> //include Wire header in standard library
 #include <SPI.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_TSL2561_U.h>
 #include "Adafruit_BME680.h"
 #include "Adafruit_SGP30.h"
+#include <Adafruit_MotorShield.h> //include Adafruit MotorShield header in standard library
+#include <Stepper.h>
 
 #define SensorPin A5
-///#define BME_SCK 13
-//define BME_MISO 12
-//define BME_MOSI 11
-//define BME_CS 10
 #define SEALEVELPRESSURE_HPA (1013.25)
+#define SensorPin0 A0 //defining A0 pin for pH-sensor1 inpin
+#define SensorPin1 A1 //defining A1 pin for pH-sensor2 inpin
+
+unsigned long int avgValue0; //store the average value of the sensor0 feedback
+unsigned long int avgValue1; //store the average value of the sensor1 feedback
+int buf0[10]; //array that include 10 undifined elements
+int buf1[10]; //array that include 10 undifined elements
+int temp0; //temperary varible for pH-testing
+int temp1; //temperary varible for pH-testing
+int phValue1; //used to calculate ph-value
+int phValue2; //used to calculate ph-value
 
 Adafruit_SGP30 sgp;
 unsigned long int avgValue;
 float b;
-float realPhValue;
+float realphValue;
 int buf[10], temp;
 
 Adafruit_TSL2561_Unified tsl = Adafruit_TSL2561_Unified(TSL2561_ADDR_FLOAT, 12345);
@@ -28,33 +37,30 @@ Adafruit_BME680 bme; // I2C
   @param temperature [°C]
   @param humidity [%RH]
 */
+
+int speedPumpN = 200; //variable for the speed on the nutrition pump when on
+int speedPumpV = 255; //variable for the speed on the water pump when on
+
+int counter = 0; // used for TSL2561
+
+Adafruit_MotorShield AFMS = Adafruit_MotorShield(); //Creating the Adafruit motorshield object
+Adafruit_DCMotor *motorLight = AFMS.getMotor(1); //Creating the dc motor 1 object
+Adafruit_DCMotor *motorESP32 = AFMS.getMotor(2); //Creating the dc motor 2 object
+Adafruit_DCMotor *motorPump1N = AFMS.getMotor(3); //Creating the dc motor 3 object
+Adafruit_DCMotor *motorPump2V = AFMS.getMotor(4); //Creating the dc motor 4 object
+
 uint32_t getAbsoluteHumidity(float temperature, float humidity) {
   // approximation formula from Sensirion SGP30 Driver Integration chapter 3.15
   const float absoluteHumidity = 216.7f * ((humidity / 100.0f) * 6.112f * exp((17.62f * temperature) / (243.12f + temperature)) / (273.15f + temperature)); // [g/m^3]
   const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity); // [mg/m^3]
   return absoluteHumidityScaled;
 }
-// set up feeds
-AdafruitIO_Feed *bme680 = io.feed("bme680");
+//setup feeds
+AdafruitIO_Feed *Temperature = io.feed("Temperature");
+AdafruitIO_Feed *Humidity = io.feed("Humidity");
 AdafruitIO_Feed *ph = io.feed("ph");
-AdafruitIO_Feed *sgp30 = io.feed("sgp30");
-AdafruitIO_Feed *tsl2561 = io.feed("tsl2561");
-
-void displaySensorDetails(void)
-{
-  sensor_t sensor;
-  tsl.getSensor(&sensor);
-  Serial.println("------------------------------------");
-  Serial.print  ("Sensor:       "); Serial.println(sensor.name);
-  Serial.print  ("Driver Ver:   "); Serial.println(sensor.version);
-  Serial.print  ("Unique ID:    "); Serial.println(sensor.sensor_id);
-  Serial.print  ("Max Value:    "); Serial.print(sensor.max_value); Serial.println(" lux");
-  Serial.print  ("Min Value:    "); Serial.print(sensor.min_value); Serial.println(" lux");
-  Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println(" lux");
-  Serial.println("------------------------------------");
-  Serial.println("");
-  delay(100);
-}
+AdafruitIO_Feed *CO2 = io.feed("CO2");
+AdafruitIO_Feed *Luminosity = io.feed("Luminosity");
 
 void configureSensor(void)
 {
@@ -67,21 +73,15 @@ void configureSensor(void)
   tsl.setIntegrationTime(TSL2561_INTEGRATIONTIME_13MS);      /* fast but low resolution */
   // tsl.setIntegrationTime(TSL2561_INTEGRATIONTIME_101MS);  /* medium resolution and speed   */
   // tsl.setIntegrationTime(TSL2561_INTEGRATIONTIME_402MS);  /* 16-bit data but slowest conversions */
-
-  /* Update these values depending on what you've set above! */
-  Serial.println("------------------------------------");
-  Serial.print  ("Gain:         "); Serial.println("Auto");
-  Serial.print  ("Timing:       "); Serial.println("13 ms");
-  Serial.println("------------------------------------");
 }
 
 void setup(void) {
-  //pinMode(13, OUTPUT);
   Serial.begin(115200);
-  while (!Serial);
-  Serial.println(F("BME680 test"));
-  Serial.println("SGP30 test");
-  Serial.println("Light Sensor Test"); Serial.println("");
+
+  //Wire.begin(0x77); //initialise bme680 address
+  //Wire.begin(0x29); //initialise tsl2561 address
+  //Wire.begin(0x58); //initialise sgp30 address
+  //Wire.begin(0x99); //initialise pH address
 
   /* Initialise the sensor */
   //use tsl.begin() to default to Wire,
@@ -92,22 +92,14 @@ void setup(void) {
     Serial.print("Ooops, no TSL2561 detected ... Check your wiring or I2C ADDR!");
     while (1);
   }
-
-  /* Display some basic information on this sensor */
-  displaySensorDetails();
-
   /* Setup the sensor gain and integration time */
   configureSensor();
 
-  if (! sgp.begin()) {
+  if (!sgp.begin()) {
     Serial.println("Sensor not found :(");
+    delay(3000);
     while (1);
   }
-  Serial.print("Found SGP30 serial #");
-  Serial.print(sgp.serialnumber[0], HEX);
-  Serial.print(sgp.serialnumber[1], HEX);
-  Serial.println(sgp.serialnumber[2], HEX);
-
   if (!bme.begin()) {
     Serial.println("Could not find a valid BME680 sensor, check wiring!");
     while (1);
@@ -128,73 +120,134 @@ void setup(void) {
     Serial.print(".");
     delay(100);
   }
-
   // we are connected
   Serial.println();
   Serial.println(io.statusText());
-  bme680->get();
+
+  AFMS.begin(); //connecting to the controller
+  motorLight->setSpeed(255); //Set the speed on motor for light
+  motorLight->run(FORWARD); //set direction on forward
+  motorLight->run(RELEASE); //turning on the motor
+
+  motorESP32->setSpeed(255); //Set the speed on motor for esp32
+  motorESP32->run(FORWARD); //set direction on forward
+  motorESP32->run(RELEASE); //turning on the motor
+
+  motorPump1N->setSpeed(0); //Set the speed on motor for pump 1
+  motorPump1N->run(FORWARD); //set direction on forward
+  motorPump1N->run(RELEASE); //turning on the motor
+
+  motorPump2V->setSpeed(0); //Set the speed on motor for pump 2
+  motorPump2V->run(FORWARD); //set direction on forward
+  motorPump2V->run(RELEASE); //turning on the motor
+
 }
-
-int counter = 0;
-
 void loop(void) {
   io.run();
-
-  if (! bme.performReading()) {
-    Serial.println("Failed to perform reading :(");
-    return;
-  }
-
-  for (int i = 0; i < 10; i++) {
-    buf[i] = analogRead(SensorPin);
-    delay(10);
-  }
-  for (int i = 0; i < 9; i++) {
-    for (int j = i + 1; j < 10; j++) {
-      if (buf[i] > buf[j]) {
-        temp = buf[i];
-        buf[i] = buf[j];
-        buf[j] = temp;
-      }
-    }
-  }
-  avgValue = 0;
-  for (int i = 2; i < 8; i++) {
-    avgValue += buf[i];
-    float phValue = (float)avgValue * 5.0 / 1024 / 6;
-    phValue = 3.5 * phValue;
-    float realPhValue = -1.7535 * phValue + 16.21;
-  }
-
+  counter++; //used for Tsl2561 sensor
   /* Get a new sensor event */
   sensors_event_t event;
   tsl.getEvent(&event);
+  //pHV1 part: _________________________________________________________________________________________________________________________________________________
+  for (int i = 0; i < 10; i++) { //get 10 sample value from the sensor for smoothing the value
+    buf0[i] = analogRead(SensorPin0); //will read analog pin 0
+    delay(10); //will delay with 0.1 sec between every read
+  }
+  for (int i = 0; i < 9; i++) { //sort the analog value from small to large
+    for (int j = i + 1; j < 10; j++) { //will loop until statment is false
+      if (buf0[i] > buf0[j]) { //if the current element i in array for buf is bigger then the current element j in array for buf
+        temp0 = buf0[i];//temp is equal to the current element i in array for buf
+        buf0[i] = buf0[j]; //then the current element i in array for buf is equal to the current element j in array for buf
+        buf0[j] = temp0; //then the current element j in array for buf temp is equal to temp
+      }
+    }
+  }
+  avgValue = 0; //average value is equal to 0
+  for (int i = 2; i < 8; i++) { //take the average value of the 6 senter samples
+    avgValue += buf0[i]; //average value is updated to plus the current element i in array for buf
+    float phValue1 = (float)avgValue * 5.0 / 1024 / 6; //convert the analog value into millivolt
+    phValue1 = 3.5 * phValue1; //convert the millivolt into pH-value
+    phValue1 = -1.7535 * phValue1 + 16.21; //convert the pH-value to match with the samples
+  }
+  //pHV2 part: _________________________________________________________________________________________________________________________________________________
+  for (int i = 0; i < 10; i++) { //get 10 sample value from the sensor for smoothing the value
+    buf1[i] = analogRead(SensorPin1); //will read analog pin 1
+    delay(10); //will delay with 0.1 sec between every read
+  }
+  for (int i = 0; i < 9; i++) { //sort theanalog value from small to large
+    for (int j = i + 1; j < 10; j++) { //will loop until statment is false
+      if (buf1[i] > buf1[j]) { //if the current element i in array for buf is bigger then the current element j in array for buf
+        temp1 = buf1[i]; //temp is equal to the current element i in array for buf
+        buf1[i] = buf1[j]; //then the current element i in array for buf is equal to the current element j in array for buf
+        buf1[j] = temp1; //then the current element j in array for buf temp is equal to temp
+      }
+    }
+  }
+  avgValue = 0; //average value is equal to 0
+  for (int i = 2; i < 8; i++) { //take the average value of the 6 senter samples
+    avgValue += buf1[i]; //average value is updated to plus the current element i in array for buf
+    float phValue2 = (float)avgValue * 5.0 / 1024 / 6; //convert the analog value into millivolt
+    phValue2 = 3.5 * phValue2; //convert the millivolt into pH-value
+    phValue2 = -1.7535 * phValue2 + 16.21; //convert the pH-value to match with the samples
+  }
+  //pH general part: _________________________________________________________________________________________________________________________________________________
+  float phValue = (phValue1 + phValue2) / 2;
+  //0 is minimum (LOW) and 255 is maximum (HIGH)
+  //Water pump stepper part: _________________________________________
+  if (touchRead(T0) > 60) { //if the value from the touch-sensors is under the wanted value than the pump is on
+    motorPump2V->setSpeed(speedPumpV); //the M3 outpin on stepper is HIGH
+  }
+  else { //if the value from the touch-sensors is equal or over the wanted value than the pump is off
+    motorPump2V->setSpeed(0); //the M3 outpin on stepper is LOW
+  }
+
+  //Nutrition pump stepper part: ________________________________________
+  if (phValue > 6.8) { //if the value from the pH-sensors is under the wanted value than the pump is on
+    motorPump1N->setSpeed(speedPumpN); //the M4 outpin on stepper is HIGH
+  }
+  else { //if the value from the pH-sensors is equal or over the wanted value than the pump is off
+    motorPump1N->setSpeed(0); //the M4 outpin on stepper is LOW
+  }
+
+  //Light stepper part: ________________________________________________
+  if (event.light < 30) { //if the value from TLS2561 is under the wanted light value than the lamp is on
+    motorLight->setSpeed(255); //the M1 outpin on stepper is HIGH
+  }
+  else { //if the value from the TLS2561 is equal or over the wanted light value than the light is off
+    motorLight->setSpeed(0); //the M1 outpin on stepper is LOW
+  }
+
+  if (! bme.performReading()) {
+    Serial.println("Failed to perform reading (bme)");
+    delay(3000);
+    return;
+  }
 
   /* Display the results (light is measured in lux) */
   if (event.light)
   {
     Serial.print(event.light); Serial.println(" lux");
-    tsl2561->save(event.light);
+    Luminosity->save(event.light);
   }
-  else
-  {
+  else {
     /* If event.light = 0 lux the sensor is probably saturated
-       and no reliable data could be generated! */
-    Serial.println("Sensor overload");
+      and no reliable data could be generated! */
+    Serial.println("Sensor overload (tsl)");
+    delay(8000);
   }
   delay(100);
 
   if (! sgp.IAQmeasure()) {
-    Serial.println("Measurement failed");
+    Serial.println("Measurement failed (sgp)");
     return;
   }
 
   if (! sgp.IAQmeasureRaw()) {
-    Serial.println("Raw Measurement failed");
+    Serial.println("Raw Measurement failed (sgp)");
     return;
   }
-  counter++;
-  if (counter == 30) {
+
+  if (counter == 30) { //
     counter = 0;
 
     uint16_t TVOC_base, eCO2_base;
@@ -203,47 +256,25 @@ void loop(void) {
       return;
     }
     Serial.print("****Baseline values: eCO2: 0x"); Serial.print(eCO2_base, HEX);
-    sgp30->save(eCO2_base);
-    Serial.print(" & TVOC: 0x"); Serial.println(TVOC_base, HEX);
-    sgp30->save(TVOC_base);
+    CO2->save(eCO2_base);
   }
-
   Serial.print("    pH:");
-  Serial.print(realPhValue, 2);
-  ph->save(realPhValue);
+  Serial.print(phValue, 2);
+  ph->save(phValue);
   Serial.println(" ");
-  //digitalWrite(13, HIGH);
-  //delay(800);
-  //digitalWrite(13, LOW);
 
   Serial.print("Temperature = ");
   Serial.print(bme.temperature);
   Serial.println(" *C");
-  bme680->save(bme.temperature);
-
-  Serial.print("Pressure = ");
-  Serial.print(bme.pressure / 100.0);
-  Serial.println(" hPa");
+  Temperature->save(bme.temperature);
 
   Serial.print("Humidity = ");
   Serial.print(bme.humidity);
   Serial.println(" %");
-  bme680->save(bme.humidity);
+  Humidity->save(bme.humidity);
 
-  Serial.print("Gas = ");
-  Serial.print(bme.gas_resistance / 1000.0);
-  Serial.println(" KOhms");
-
-  Serial.print("Approx. Altitude = ");
-  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
-  Serial.println(" m");
-
-  Serial.print("Raw H2 "); Serial.print(sgp.rawH2); Serial.print(" \t");
-  Serial.print("Raw Ethanol "); Serial.print(sgp.rawEthanol); Serial.println("");
-
-  Serial.print("TVOC "); Serial.print(sgp.TVOC); Serial.print(" ppb\t");
   Serial.print("eCO2 "); Serial.print(sgp.eCO2); Serial.println(" ppm");
 
   Serial.println();
-  delay(2500);
+  delay(30000);
 }
